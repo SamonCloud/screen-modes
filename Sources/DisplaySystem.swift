@@ -29,6 +29,7 @@ struct Topology: Equatable {
 
     var internalScreen: Display? { online.first(where: \.builtIn) }
     var internalInUse: Bool { internalScreen.map { $0.active || $0.mirrorOf != 0 } ?? false }
+    var internalAvailable: Bool { internalInUse || internalScreen?.asleep == true }
     var external: [Display] { online.filter { !$0.builtIn } }
 }
 
@@ -66,6 +67,11 @@ final class DisplaySystem {
         #else
         return false
         #endif
+    }
+
+    var sessionLocked: Bool {
+        let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+        return session?["CGSSessionScreenIsLocked"] as? Bool == true
     }
 
     private func ids(_ list: (UInt32, UnsafeMutablePointer<DisplayID>, UnsafeMutablePointer<UInt32>) -> Int32) -> [DisplayID]? {
@@ -134,7 +140,7 @@ final class DisplaySystem {
         guard let id = state.internalID ?? fallback else { throw DisplayFailure.unavailable }
         if !enabled {
             // Recheck against the live topology immediately before turning off the panel.
-            guard let replacement, state.main == replacement,
+            guard !sessionLocked, let replacement, state.main == replacement,
                   state.external.contains(where: {
                       $0.id == replacement && $0.active && !$0.asleep && !$0.mirrored
                   }) else { throw DisplayFailure.unsafe }

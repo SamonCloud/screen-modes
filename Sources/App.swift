@@ -24,6 +24,7 @@ final class ScreenModesApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var wakeGrace: TimeInterval = 0
     private var sleeping = false
     private var screensSleeping = false
+    private var screenLocked = false
     private var attempts = 0
     private var nextAttempt: TimeInterval = 0
     private var displayCallbackRegistered = false
@@ -63,6 +64,11 @@ final class ScreenModesApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         center.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
         center.addObserver(self, selector: #selector(screensDidSleep), name: NSWorkspace.screensDidSleepNotification, object: nil)
         center.addObserver(self, selector: #selector(screensDidWake), name: NSWorkspace.screensDidWakeNotification, object: nil)
+        let session = DistributedNotificationCenter.default()
+        session.addObserver(self, selector: #selector(didLock), name: Notification.Name("com.apple.screenIsLocked"),
+                            object: nil, suspensionBehavior: .deliverImmediately)
+        session.addObserver(self, selector: #selector(didUnlock), name: Notification.Name("com.apple.screenIsUnlocked"),
+                            object: nil, suspensionBehavior: .deliverImmediately)
         displayCallbackRegistered = CGDisplayRegisterReconfigurationCallback(
             displayChanged, Unmanaged.passUnretained(self).toOpaque()
         ) == .success
@@ -77,20 +83,56 @@ final class ScreenModesApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         terminating = true
         timer?.invalidate()
+        DistributedNotificationCenter.default().removeObserver(self)
         if displayCallbackRegistered {
             CGDisplayRemoveReconfigurationCallback(displayChanged, Unmanaged.passUnretained(self).toOpaque())
         }
         updateRecoveryActivity(needed: false)
     }
 
-    @objc private func willSleep() { sleeping = true; presence.clear() }
-    @objc private func didWake() { sleeping = false; screensSleeping = false; afterWake() }
-    @objc private func screensDidSleep() { screensSleeping = true; presence.clear() }
-    @objc private func screensDidWake() { screensSleeping = false; afterWake() }
+    @objc private func willSleep() {
+        sleeping = true
+        presence.clear()
+        // Make the panel available while WindowServer can still address it.
+        if ownsDisable, let current = system.topology(),
+           internalDisplaySleepAction(current, sessionProtected: true, appDisabledPanel: true) == .restorePanel {
+            restoreForSleep(current)
+        }
+    }
+
+    @objc private func didWake() {
+        sleeping = false
+        screensSleeping = false
+        afterWake()
+    }
+
+    @objc private func screensDidSleep() {
+        screensSleeping = true
+        resetAttempts()
+        reconcile()
+    }
+
+    @objc private func screensDidWake() {
+        screensSleeping = false
+        afterWake()
+    }
+
+    @objc private func didLock() {
+        screenLocked = true
+        resetAttempts()
+        reconcile()
+    }
+
+    @objc private func didUnlock() {
+        screenLocked = false
+        screensSleeping = false
+        afterWake()
+    }
 
     private func afterWake() {
         wakeGrace = ProcessInfo.processInfo.systemUptime + 3
         resetAttempts()
+        reconcile()
     }
 
     private func resetAttempts() { attempts = 0; nextAttempt = 0 }
@@ -133,7 +175,7 @@ final class ScreenModesApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 updateBadge()
                 logger.notice("Last external display disconnected; mode selection cleared")
             }
-            if ownsDisable && !current.lidClosed && !current.internalInUse {
+            if ownsDisable && !current.lidClosed && !current.internalAvailable {
                 recoverAfterUnplug(current, now: now, confirmed: confirmed)
                 return
             }
@@ -141,7 +183,26 @@ final class ScreenModesApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             presence.clear()
             resetOutputRequested = false
         }
-        guard !screensSleeping else { return }
+        let protected = screensSleeping || screenLocked || system.sessionLocked || now < wakeGrace
+        switch internalDisplaySleepAction(current, sessionProtected: protected, appDisabledPanel: ownsDisable) {
+        case .restorePanel:
+            attempt("正在为锁屏或睡眠恢复内屏…", now: now) { restoreForSleep(current) }
+            return
+        case .keepPanelAvailable:
+            if ownsDisable && current.internalAvailable {
+                ownsDisable = false
+                updateRecoveryActivity(needed: false)
+                logger.notice("Built-in display available during lock or display sleep")
+            }
+            if !hasExternal && selected == nil && !current.lidClosed && current.internalAvailable {
+                showStatus("仅内屏")
+            } else if mode?.closesInternal == true {
+                showStatus("已保留选择 · 解锁或显示器唤醒后继续")
+            }
+            return
+        case .continueMode:
+            break
+        }
 
         if now >= wakeGrace, mode?.closesExternal != true || current.lidClosed {
             if !disabled.isEmpty {
@@ -213,12 +274,18 @@ final class ScreenModesApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateRecoveryActivity(needed: Bool) {
         if needed && recoveryActivity == nil {
             recoveryActivity = ProcessInfo.processInfo.beginActivity(
-                options: .userInitiatedAllowingIdleSystemSleep, reason: "Restore built-in display after unplug"
+                options: .userInitiated, reason: "Keep sleep recovery available while the built-in display is disabled"
             )
         } else if !needed, let activity = recoveryActivity {
             ProcessInfo.processInfo.endActivity(activity)
             recoveryActivity = nil
         }
+    }
+
+    private func restoreForSleep(_ current: Topology) {
+        logger.notice("Restoring the built-in display for lock or sleep")
+        do { try system.showInternal(true, snapshot: current) }
+        catch { logger.error("Pre-sleep restore failed: \(error.localizedDescription, privacy: .public)") }
     }
 
     private func recoverAfterUnplug(_ current: Topology, now: TimeInterval, confirmed: Bool) {

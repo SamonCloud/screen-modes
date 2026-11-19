@@ -174,3 +174,16 @@ struct ExternalPresence {
         return false
     }
 }
+
+enum InternalDisplaySleepAction: Equatable {
+    case continueMode, keepPanelAvailable, restorePanel
+}
+
+func internalDisplaySleepAction(_ topology: Topology, sessionProtected: Bool,
+                                appDisabledPanel: Bool) -> InternalDisplaySleepAction {
+    guard sessionProtected else { return .continueMode }
+    if appDisabledPanel && !topology.lidClosed && !topology.internalAvailable {
+        return .restorePanel
+    }
+    return .keepPanelAvailable
+}

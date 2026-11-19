@@ -65,4 +65,18 @@ expect(roundTrip.primary == .externalScreen && roundTrip.secondary == .mirrored,
 expect(isHeadlessPlaceholder(vendor: 0x756E6B6E, model: 0x76697274), "WindowServer fallback must not count as an external monitor")
 expect(!isHeadlessPlaceholder(vendor: 0x10AC, model: 0x9840), "Keep a connected Dell monitor")
 expect(!isHeadlessPlaceholder(vendor: 0x756E6B6E, model: 0x9840), "Unknown vendor alone does not make a display a placeholder")
-print("通过：29 项显示切换、断线和预设检查")
+expect(internalDisplaySleepAction(builtinOffline, sessionProtected: true, appDisabledPanel: true) == .restorePanel,
+       "Restore the built-in at lock or sleep even while the external is still connected")
+let sleepingExternal = setup([screen(2, asleep: true)], main: 2)
+expect(internalDisplaySleepAction(sleepingExternal, sessionProtected: true, appDisabledPanel: true) == .restorePanel,
+       "Restore the built-in when the only external display is already asleep")
+let sleepingInternal = setup([screen(1, asleep: true)])
+expect(internalDisplaySleepAction(sleepingInternal, sessionProtected: true, appDisabledPanel: true) == .keepPanelAvailable,
+       "A sleeping but online built-in panel can wake normally")
+expect(internalDisplaySleepAction(lidShut, sessionProtected: true, appDisabledPanel: true) == .keepPanelAvailable,
+       "Wait for an open lid before trying to restore the panel")
+expect(internalDisplaySleepAction(twoScreens, sessionProtected: true, appDisabledPanel: false) == .keepPanelAvailable,
+       "Do not reapply the mode while the session is locked")
+expect(internalDisplaySleepAction(twoScreens, sessionProtected: false, appDisabledPanel: false) == .continueMode,
+       "Resume the selected mode once the session is awake and unlocked")
+print("通过：35 项显示切换、断线、锁屏和预设检查")
